@@ -106,8 +106,122 @@ class ForeachAbstractHandler:
         foreach_attrs = self._update_attributes(config_attrs, key_to_val_changes)
         new_resource.foreach_attrs = foreach_attrs
 
+    def _update_attributes2(self, attrs: dict[str, Any], key_to_val_changes: dict[str, Any]) -> list[str]:
+        foreach_attributes: list[str] = []
+        for key_to_change, val_to_change in key_to_val_changes.items():
+            for k, v in attrs.items():
+                v_changed = False
+                if isinstance(v, str):
+                    v_changed = self.__update_str_attrs(attrs, key_to_change, val_to_change, k)
+                elif isinstance(v, dict):
+                    nested_attrs = self._update_attributes(v, {key_to_change: val_to_change})
+                    foreach_attributes.extend([k + '.' + na for na in nested_attrs])
+                elif isinstance(v, list) and len(v) == 1 and isinstance(v[0], dict):
+                    nested_attrs = self._update_attributes(v[0], {key_to_change: val_to_change})
+                    foreach_attributes.extend([k + '.' + na for na in nested_attrs])
+                elif isinstance(v, list) and len(v) == 1 and isinstance(v[0], str) and key_to_change in v[0]:
+                    if attrs[k][0] == "${" + key_to_change + "}":
+                        attrs[k][0] = val_to_change
+                        v_changed = True
+                    elif f"{key_to_change}." in attrs[k][0] and isinstance(val_to_change, dict):
+                        for inner_key, inner_value in val_to_change.items():
+                            str_to_replace = f"{key_to_change}.{inner_key}"
+                            if str_to_replace in attrs[k][0]:
+                                dollar_wrapped_str_to_replace = "${" + str_to_replace + "}"
+                                if attrs[k][0] == dollar_wrapped_str_to_replace:
+                                    attrs[k][0] = inner_value
+                                    v_changed = True
+                                    continue
+                                elif dollar_wrapped_str_to_replace in attrs[k][0]:
+                                    str_to_replace = dollar_wrapped_str_to_replace
+                                attrs[k][0] = attrs[k][0].replace(str_to_replace, str(inner_value))
+                                v_changed = True
+                    else:
+                        attrs[k][0] = attrs[k][0].replace("${" + key_to_change + "}", str(val_to_change))
+                        if self.need_to_add_quotes(attrs[k][0], key_to_change):
+                            attrs[k][0] = attrs[k][0].replace(key_to_change, f'"{str(val_to_change)}"')
+                        else:
+                            attrs[k][0] = attrs[k][0].replace(key_to_change, str(val_to_change))
+                        v_changed = True
+                elif isinstance(v, list) and len(v) == 1 and isinstance(v[0], list):
+                    for i, item in enumerate(v):
+                        if isinstance(item, str) and (key_to_change in item or "${" + key_to_change + "}" in item):
+                            if v[i] == "${" + key_to_change + "}":
+                                v[i] = val_to_change
+                                v_changed = True
+                            else:
+                                v[i] = item.replace("${" + key_to_change + "}", str(val_to_change))
+                                v[i] = v[i].replace(key_to_change, str(val_to_change))
+                                v_changed = True
+                if v_changed:
+                    foreach_attributes.append(k)
+        return foreach_attributes
+    
+    def _flatten_for_interpolation(self, data, prefix="", out={}):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                k = f"{prefix}.{key}" if prefix else key
+                self._flatten_for_interpolation(value, k, out)
+            # maybe add value pointing to full dict: out[prefix] = data ?
+        elif isinstance(data, list):
+            for key, value in enumerate(data):
+                k = f"{prefix}[{key}]" if prefix else key
+                self._flatten_for_interpolation(value, k, out)
+        else:
+            out[ prefix ] = data
+        return out
+    
     def _update_attributes(self, attrs: dict[str, Any], key_to_val_changes: dict[str, Any]) -> list[str]:
         foreach_attributes: list[str] = []
+
+        possible_interpolations = self._flatten_for_interpolation(key_to_val_changes)
+
+        updated_attributes = self._update_attributes_recursive("", attrs, possible_interpolations)
+        # Get unique list
+        updated_attributes = list(set(updated_attributes))
+        return updated_attributes
+
+    def _update_attributes_recursive(self, prefix: str, attrs: dict[str, Any], possible_interpolations: dict, updated_attributes=[]):
+        for attr_k, attr_v in attrs.items():
+            full_attribute_key = f"{prefix}.{attr_k}" if prefix else attr_k
+            if isinstance(attr_v, str):
+                print("hmm")
+            elif isinstance(attr_v, dict):
+                self._update_attributes_recursive(full_attribute_key, attr_v, possible_interpolations, updated_attributes)
+            elif isinstance(attr_v, list) and len(attr_v) == 1:
+                if isinstance(attr_v[0], dict):
+                    self._update_attributes_recursive(full_attribute_key, attr_v[0], possible_interpolations, updated_attributes)
+                elif isinstance(attr_v[0], str):
+                    for interp_k, interp_v in possible_interpolations.items():
+                        dollar_wrapped_str_to_replace = "${" + interp_k + "}"
+                        if attr_v[0] == dollar_wrapped_str_to_replace:
+                            attrs[attr_k][0] = interp_v
+                            updated_attributes.append(attr_k)
+                            break
+                        elif dollar_wrapped_str_to_replace in attr_v[0]:
+                            # there was quote-adding logic in old function ... why?
+                            attrs[attr_k][0] = attr_v[0].replace(dollar_wrapped_str_to_replace, str(interp_v))
+                            updated_attributes.append(attr_k)
+                        elif interp_k in attr_v[0]:
+                            attrs[attr_k][0] = attr_v[0].replace(interp_k, str(interp_v))
+                            updated_attributes.append(attr_k)
+                # TODO: think i'm missing something here
+                # attribute value contains a nested list
+                elif isinstance(attr_v[0], list):
+                    for interp_k, interp_v in possible_interpolations.items():
+                        dollar_wrapped_str_to_replace = "${" + interp_k + "}"
+
+                        for i, item in enumerate(attr_v):
+                            if isinstance(item, str) and (key_to_change in item or "${" + key_to_change + "}" in item):
+                                if attr_v[i] == "${" + key_to_change + "}":
+                                    attr_v[i] = val_to_change
+                                    v_changed = True
+                                else:
+                                    attr_v[i] = item.replace("${" + key_to_change + "}", str(val_to_change))
+                                    attr_v[i] = attr_v[i].replace(key_to_change, str(val_to_change))
+                                    v_changed = True
+
+
         for key_to_change, val_to_change in key_to_val_changes.items():
             for k, v in attrs.items():
                 v_changed = False
